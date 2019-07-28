@@ -1,0 +1,405 @@
+# Our goal is to find historically best performing stocks among the S&P 500 companies. In our undersanding, high performance means higher returns among the stocks with lower standard deviation, because they are supposed to be more stable over time. For this, we are going to show, that less risky assets perform better over the long-run using the regression analysis. We are basing our evaluation on finding the reward-to-risk ratio as a modified Sharpe ratio. 
+
+# Install the necessary packages
+install.packages("rvest")
+install.packages("quantmod")
+install.packages("tidyverse")
+install.packages("stringr")
+install.packages("modelr")
+install.packages("lubridate")
+install.packages("plotly")
+install.packages("knitr")
+# Load all the necessary packages
+```{r setup, echo=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rvest)      # allows us to use html data in r
+library(quantmod)   # get stock prices, used on homework
+library(tidyverse)  # ggplot2, purrr (where the map function comes from), dplyr, tidyr, readr, tibble
+library(stringr)    # allows us to change and catergorize strings
+library(modelr)     # geom_ref_line() function
+library(lubridate)  # allows us to analyze stocks at different time periods
+library(plotly)     # let's us see the results in interactive and malleable graphs
+library(rvest)
+library(dplyr)
+```
+# first, we obtain data of the S&P 500, using the rvest package to read html
+```{r setup1, echo=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+sp_500 <- read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies") %>%
+    html_node("table.wikitable") %>%
+    html_table() %>%
+    select(`Symbol`, `Security`, `GICS Sector`, `GICS Sub Industry`) %>%
+    as_tibble()
+# order the names alphabetically
+names(sp_500) <- sp_500 %>% 
+    names() %>% 
+    str_to_lower() %>% 
+    make.names()
+# See our results to make sure everything is in order
+sp_500 
+sp_500 %>% 
+    lapply(function(x) x %>% unique() %>% length()) %>%
+    unlist() # get red of redundancies
+sp_500 %>% ## show what each symbol represents, and to make sure each is represented
+    group_by(security) %>%
+    summarize(count = n()) %>%
+    filter(count > 1)
+print(sp_500)
+
+```
+
+
+```{r cars, echo=TRUE}
+sp_500 %>%
+    # group data into sectors, and count how many securities are in each
+    group_by(gics.sector) %>%
+    summarise(count = n()) %>%
+    # use ggplot to see
+    ggplot(aes(x = gics.sector %>% fct_reorder(count),
+               y = count
+               )) + 
+    geom_bar(stat = "identity") +
+    geom_text(aes(label = count), size = 3, nudge_y = 4, nudge_x = .1) + 
+    scale_y_continuous(limits = c(0,100)) +
+    ggtitle(label = "Sector Frequency Among SP500 Stocks") +
+    xlab(label = "GICS Sector") +
+    theme(plot.title = element_text(size = 16)) + 
+    coord_flip()
+```
+
+
+# After seeing the sector representation, we now want to find the returns of the securites.
+```{r pressure, echo=TRUE}
+##First, we need to find the historical stock prices, doing so using the function:
+get_stock_prices <- function(ticker, return_format = "tibble", ...) {
+    # actually getting the data for stock prices
+    stock_prices_xts <- getSymbols(Symbols = ticker, auto.assign = FALSE, ...)
+    # now group and rename the stock prices according to their catergory
+    names(stock_prices_xts) <- c("Open", "High", "Low", "Close", "Volume", "Adjusted")
+    # if we cannot place the price in a tibble catergory, we leave it as xts
+    if (return_format == "tibble") {
+        stock_prices <- stock_prices_xts %>%
+            as_tibble() %>%
+            rownames_to_column(var = "Date") %>%
+            mutate(Date = ymd(Date))
+    } else {
+        stock_prices <- stock_prices_xts
+    }
+    stock_prices
+}
+
+```
+
+## after obtaining the stock prices, we can now find daily purportional returns, using log form
+```{r pressure17, echo=TRUE}
+
+get_log_returns <- function(x, return_format = "tibble", period = 'daily', ...) {
+    # Converts any found tibble into xts format
+    if (!is.xts(x)) {
+        x <- xts(x[,-1], order.by = x$Date)
+    }
+    # now to calculate the log returns:
+    log_returns_xts <- periodReturn(x = x$Adjusted, type = 'log', period = period, ...)
+    # now we rename these returns and convert them back into tibbles
+    names(log_returns_xts) <- "Log.Returns"
+    # however, if it cannot be placed in any tibble, the return can remain xts
+    if (return_format == "tibble") {
+        log_returns <- log_returns_xts %>%
+            as_tibble() %>%
+            rownames_to_column(var = "Date") %>%
+            mutate(Date = ymd(Date))
+    } else {
+        log_returns <- log_returns_xts
+    }
+    log_returns
+}
+```
+### we filter out stocks whose data is unobtainable 
+```{r pressure6, echo=TRUE}
+
+sp_500 <- sp_500 %>% 
+    filter(symbol != "BRK.B")
+sp_500 <- sp_500 %>% 
+    filter(symbol != "BF.B")
+sp_500 <- sp_500 %>% 
+    filter(symbol != "BKNG")
+sp_500 <- sp_500 %>% 
+    filter(symbol != "BHF")
+sp_500 <- sp_500 %>% 
+    filter(symbol != "CAT")
+sp_500 <- sp_500 %>% 
+    filter(symbol != "CLX")
+sp_500 <- sp_500 %>% 
+    filter(symbol != "UA")
+sp_500 <- sp_500 %>% 
+    filter(symbol != "WELL")
+```
+## and now, we can use these functions to find the historical prices and log daily returns of all stocks in the S&P 500, so that we may compare their returns and standard deviation of said returns
+```{r pressure7, echo=TRUE}
+sp_500 <- sp_500 %>%
+    mutate(
+        stock.prices = map(symbol, 
+                              function(.x) get_stock_prices(.x, 
+                                                            return_format = "tibble",
+                                                            from = "2007-01-01",
+                                                            to = "2019-07-28")
+                           ),
+        log.returns  = map(stock.prices, 
+                              function(.x) get_log_returns(.x, return_format = "tibble")),
+        mean.log.returns = map_dbl(log.returns, ~ mean(.$Log.Returns)),
+        sd.log.returns   = map_dbl(log.returns, ~ sd(.$Log.Returns)),
+        n.trade.days = map_dbl(stock.prices, nrow)
+        )  
+sp_500 %>% 
+    select(symbol, stock.prices:log.returns) 
+sp_500$stock.prices[[1]] 
+```
+## Intuitively, it makes sense that we would want to prioritze stocks with high returns
+## and low volatility. However, it is useful to still show that empircally, stocks with 
+## high standard deviations of returns tend to perform poorly over time. 
+
+```{r pressure8, echo=TRUE}
+
+library(plotly)
+plot_ly(data   = sp_500,
+        type   = "scatter",
+        mode   = "markers",
+        x      = ~ sd.log.returns,
+        y      = ~ mean.log.returns,
+        color  = ~ n.trade.days,
+        colors = "Blues",
+        size   = ~ n.trade.days,
+        text   = ~ str_c("<em>", security, "</em><br>",
+                         "Ticker: ", symbol, "<br>",
+                         "Sector: ", gics.sector, "<br>",
+                         "Sub Sector: ", gics.sub.industry, "<br>",
+                         "Num of Trading Days: ", n.trade.days),
+        marker = list(opacity = 0.8,
+                      symbol = 'circle',
+                      sizemode = 'diameter',
+                      sizeref = 4.0,
+                      line = list(width = 2, color = '#FFFFFF'))
+        ) %>%
+layout(title   = 'S&P 500 Analysis: Stock Risk(SD) vs Reward',
+       xaxis   = list(title = 'Risk/Variance (StDev of Log Returns)',
+                    gridcolor = 'rgb(255, 255, 255)',
+                    zerolinewidth = 1,
+                    ticklen = 5,
+                    gridwidth = 2),
+       yaxis   = list(title = 'Reward/Growth (Mean Log Returns)',
+                      gridcolor = 'rgb(255, 255, 255)',
+                      zerolinewidth = 1,
+                      ticklen = 5,
+                      gridwith = 2),
+       margin = list(l = 100,
+                     t = 100,
+                     b = 100),
+       font   = list(color = '#FFFFFF'),
+       paper_bgcolor = 'rgb(0, 0, 0)',
+       plot_bgcolor = 'rgb(0, 0, 0)')
+
+trade_day_thresh <- 2000
+sd_limit <- 0.075
+sp_500 %>%
+    filter(n.trade.days >= trade_day_thresh,
+           sd.log.returns <= sd_limit) %>%
+    ggplot(aes(x = sd.log.returns, y = mean.log.returns)) +
+    geom_point(alpha = 0.1) +
+    geom_smooth() +
+    labs(title = "Returns tend to decrease with time, for stocks with high deviations of returns",
+         subtitle = "(So, we look for stocks with low deviations, but still high returns)",
+         x = "Standard Deviation of Daily Log Returns (SDDLR)",
+         y = "Mean Daily Log Returns (MDLR)")
+```
+
+```{r pressure10, echo=TRUE}
+
+sp_500 <- sp_500 %>%
+    filter(n.trade.days >= 2000) %>%
+    mutate(reward.metric = 2500 * (mean.log.returns / sd.log.returns))
+
+# Now we find the reward to risk ratio of all stocks
+trade_day_thresh <- 2000
+lab <- "S&P500"
+back_col <- '#2C3E50'
+font_col <- '#FFFFFF'
+line_col <- "#FFFFFF"
+grid_col <- 'rgb(255, 255, 255)'
+col_brew_pal <- 'BrBG'
+# Plotly
+plot_ly(data   = sp_500 %>% filter(n.trade.days >= trade_day_thresh),
+        type   = "scatter",
+        mode   = "markers",
+        x      = ~ sd.log.returns,
+        y      = ~ mean.log.returns,
+        color  = ~ reward.metric,
+        colors = col_brew_pal,
+        size   = ~ reward.metric,
+        text   = ~ str_c("Ticker: ", symbol, "<br>",
+                         "No. of Trading Days: ", n.trade.days, "<br>",
+                         "Reward to Risk: ", round(reward.metric, 1)),
+        marker = list(opacity = 0.8,
+                      symbol = 'circle',
+                      sizemode = 'diameter',
+                      sizeref = 4.0,
+                      line = list(width = 2, color = line_col))
+        ) %>%
+    layout(title   = str_c(lab, 'Analysis: Stock Risk vs Reward', sep = " "),
+           xaxis   = list(title = 'Risk: StDev of Daily Log Returns (SDDLR)',
+                          gridcolor = grid_col,
+                          zerolinewidth = 1,
+                          ticklen = 5,
+                          gridwidth = 2),
+           yaxis   = list(title = 'Reward: Mean Daily Log Returns (MDLR)',
+                          gridcolor = grid_col,
+                          zerolinewidth = 1,
+                          ticklen = 5,
+                          gridwith = 2),
+           margin = list(l = 100,
+                         t = 100,
+                         b = 100),
+           font   = list(color = font_col),
+           paper_bgcolor = back_col,
+           plot_bgcolor = back_col)
+```
+# now, we look for high performing stocks (top 15)
+```{r pressure1, echo=TRUE}
+top_n_limit <- 15
+hp <- sp_500 %>%
+    mutate(rank = reward.metric %>% desc() %>% min_rank()) %>%
+    filter(rank <= top_n_limit) %>%
+    arrange(rank) 
+hp %>%
+    select(symbol, rank, reward.metric)
+```
+# Function to find mean return by year
+```{r pressure2, echo=TRUE}
+means_by_year <- function(log.returns) {
+    log.returns %>%
+        mutate(year = year(Date)) %>%
+        group_by(year) %>%
+        summarize(mean.log.returns = mean(Log.Returns))
+}
+# now we map the function to the dataframe
+hp <- hp %>%
+    mutate(means.by.year = map(log.returns, means_by_year))
+# Now we can see these returns
+hp %>% select(symbol, means.by.year)
+# and unnest high-performing stocks
+hp_unnest <- hp %>%
+    select(symbol, means.by.year) %>%
+    unnest()
+hp_unnest
+```
+
+# now we can take a look at these high-performing stocks uusing ggplot
+```{r pressure3, echo=TRUE}
+hp_unnest %>%
+    ggplot(aes(x = year, y = mean.log.returns)) +
+    geom_ref_line(h = 0) +
+    geom_line(aes(col = symbol)) +
+    geom_smooth(method = "lm", se = FALSE) +
+    facet_wrap(~ symbol, nrow = 3) +
+    theme(legend.position = "None", axis.text.x = element_text(angle=90)) +
+    labs(title = "Best Prospects Have Consistent, Above-Zero MDLR and Growth",
+         subtitle = "Trend Flat to Upward Indicates Growth",
+         x = "Year",
+         y = "Mean Daily Log Returns (MDLR)")
+```
+# We can also make a function to see how often stocks have a negative average return for a year
+
+```{r pressure4, echo=TRUE}
+means_below_zero <- function(means.by.year) {
+    means.by.year %>%
+        filter(mean.log.returns < 0) %>%
+        nrow()
+}
+# once again, we can map this to the dataframe
+hp <- hp %>%
+    mutate(means.below.zero = map_dbl(means.by.year, means_below_zero))
+# and now we can see what stocks have gotten negative returns and how many
+hp %>% select(symbol, means.below.zero)
+```
+
+##Now we generate a linear model to see if the log returns increase or decrease by year
+
+```{r pressure5, echo=TRUE}
+means_by_year_model <- function(means.by.year) {
+    lm(mean.log.returns ~ year, data = means.by.year)
+}
+## we test this by applying the funciton to a random stock in the index
+hp$means.by.year[[5]] %>%
+    means_by_year_model() 
+# We got a negative coefficient, suggesting that log returns decrease over time for this stock
+
+## now, we take the slope generated by this model to reperesent the relation
+slope <- function(means.by.year.model) {
+    means.by.year.model$coefficients[[2]]
+}
+## we can again test this out on a random stock in the index
+hp$means.by.year[[5]] %>%
+    means_by_year_model() %>%
+    slope()
+
+# now we map these funcitons to the dataset 
+hp <- hp %>%
+    mutate(
+        means.by.year.model = map(means.by.year, means_by_year_model),
+        slope = map_dbl(means.by.year.model, slope)
+    )
+# and see what we've found
+hp %>% select(symbol, means.by.year.model, slope)
+# We can see, that for more than a half of the stocks log returns decrease over time
+
+# now we do the same, but for SD
+sd_of_means_by_year <- function(means.by.year) {
+    sd(means.by.year$mean.log.returns)
+}
+# and once again map this to the data frame
+hp <- hp %>%
+    mutate(sd.of.means.by.year = map_dbl(means.by.year, sd_of_means_by_year))
+# and, once again, see what we've found 
+hp %>% select(symbol, sd.of.means.by.year)
+
+## now, the standard deviations, returns, and number of negative yearly returns, to generate
+## a growth-to-consistency funciton, similar to the Sharpe ratio, or G = returns/(means.below.zero + 1)*sd.of.means.by.year
+hp <- hp %>%
+    mutate(growth.metric = slope /((means.below.zero + 1) * sd.of.means.by.year))  
+hp %>% select(symbol, growth.metric, slope, means.below.zero, sd.of.means.by.year) %>%
+    arrange(desc(growth.metric)) %>%
+    knitr::kable() # Nice table format
+```
+
+
+## now, we see how the top 6 stocks perform using this metric
+```{r pressure13, echo=TRUE}
+
+top_n_limit <- 6
+hp %>%
+    mutate(rank = growth.metric %>% desc() %>% min_rank()) %>%
+    filter(rank <= top_n_limit) %>%
+    select(symbol, stock.prices) %>%
+    unnest() %>%
+    ggplot(aes(x = Date, y = Adjusted, col = symbol)) +
+    geom_line() +
+    facet_wrap(~ symbol, nrow = 3, scales = "free_y") +
+    theme(legend.position = "None") +
+    labs(title = "Prospecting Best Stocks of the S&P 500!",
+         subtitle = "Six Small Caps with Amazing Growth, Most Consistency",
+         x = "Year",
+         y = "Price per Share")
+```
+
+# Among the 15 top performing while more stable stocks, we found that they rarely went below 0 annualy over the years under consideration. As can be seen, the best performing stocks belong to the following industries: financial, IT, healthcare and retail. Our hypothesis that less volitile assets perform better over the long run was proved by the regression model. 
+
+
+
+
+
+
+
+
+
+
+
+
